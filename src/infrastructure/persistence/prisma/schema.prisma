@@ -1,0 +1,133 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model Goal {
+  id          String   @id @default(uuid())
+  title       String
+  description String?
+  facet       String
+  difficulty  String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relationships
+  subGoals    SubGoal[]
+  coachAgent  CoachAgent?
+  streaks     Streak[]
+  activityLogs ActivityLog[]
+}
+
+model SubGoal {
+  id          String   @id @default(uuid())
+  title       String
+  description String?
+  isCompleted Boolean  @default(false)
+  order       Int      @default(0)
+  
+  // Relationships
+  goalId      String
+  goal        Goal     @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  tasks       Task[]
+}
+
+model Task {
+  id              String   @id @default(uuid())
+  title           String
+  description     String?
+  isCompleted     Boolean  @default(false)
+  
+  // Context-bound
+  location        String?
+  requiredEnergy  Int?
+  requiredTools   String? // Store as JSON or comma-separated if simple
+  
+  // Time-bound
+  estimatedMinutes Int?
+  deadline        DateTime?
+  
+  difficulty      String
+  
+  // Relationships
+  subGoalId       String
+  subGoal         SubGoal  @relation(fields: [subGoalId], references: [id], onDelete: Cascade)
+  
+  scheduleBlocks  ScheduleBlock[]
+  activityLogs    ActivityLog[]
+}
+
+model ScheduleBlock {
+  id        String   @id @default(uuid())
+  startTime DateTime
+  endTime   DateTime
+  label     String
+  isFixed   Boolean  @default(false)
+  
+  // Relationships
+  taskId    String?
+  task      Task?    @relation(fields: [taskId], references: [id])
+}
+
+model JournalEntry {
+  id        String   @id @default(uuid())
+  date      DateTime
+  content   String
+  tags      String[]
+  imageUrls String[]
+  audioUrls String[]
+  createdAt DateTime @default(now())
+}
+
+model ActivityLog {
+  id              String   @id @default(uuid())
+  timestamp       DateTime
+  description     String
+  durationMinutes Int
+  
+  // Relationships
+  taskId          String?
+  task            Task?    @relation(fields: [taskId], references: [id])
+  goalId          String?
+  goal            Goal?    @relation(fields: [goalId], references: [id])
+}
+
+model MetricSnapshot {
+  id        String   @id @default(uuid())
+  timestamp DateTime
+  key       String
+  value     String   // Store as string to handle mixed types or use specific fields
+  unit      String
+}
+
+model Streak {
+  id               String   @id @default(uuid())
+  currentStreak    Int
+  longestStreak    Int
+  lastActivityDate DateTime
+  startDate        DateTime
+  
+  // Relationships
+  goalId           String?
+  goal             Goal?    @relation(fields: [goalId], references: [id], onDelete: Cascade)
+}
+
+model CoachAgent {
+  id                String   @id @default(uuid())
+  facet             String
+  name              String
+  personalityProfile String?
+  
+  // Relationships
+  goalId            String   @unique
+  goal              Goal     @relation(fields: [goalId], references: [id], onDelete: Cascade)
+}
+
+model SuperAgent {
+  id   String @id @default(uuid())
+  name String
+}
