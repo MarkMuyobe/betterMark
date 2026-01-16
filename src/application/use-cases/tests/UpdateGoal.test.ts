@@ -14,14 +14,15 @@ describe('UpdateGoal Use Case', () => {
         repository = new InMemoryGoalRepository();
         useCase = new UpdateGoal(repository);
 
-        // Seed
+        // Seed with past timestamp to ensure updatedAt comparison works
+        const pastDate = new Date(Date.now() - 1000);
         existingGoal = {
             id: 'goal-1',
             title: 'Old Title',
             facet: Facet.Career,
             difficulty: DifficultyProfile.Medium,
-            createdAt: new Date(),
-            updatedAt: new Date(),
+            createdAt: pastDate,
+            updatedAt: pastDate,
             coachAgentId: 'agent-1',
             subGoalIds: [],
             isCompleted: false
