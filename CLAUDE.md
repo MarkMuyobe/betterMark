@@ -60,4 +60,4 @@ SQLite via Prisma. Schema is in `schema.prisma`. Currently uses a mock Prisma cl
 
 ### Testing
 
-Tests use Vitest with in-memory repository implementations. Test files are colocated in `src/application/use-cases/tests/`.
+Tests use Vitest with in-memory repository implementations. Test files are colocated in `src/application/use-cases/tests/`. Configuration is in `vitest.config.ts` which excludes `dist/` from test runs.
