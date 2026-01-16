@@ -55,3 +55,8 @@ export * from './infrastructure/persistence/repositories/PrismaActivityRepositor
 // Shared
 export * from './shared/types/Common.js';
 export * from './shared/utils/IdGenerator.js';
+
+// V6 Agent Governance
+export * from './domain/value-objects/AgentPolicy.js';
+export * from './application/services/AgentGovernanceService.js';
+export * from './application/ai/PromptTemplates.js';

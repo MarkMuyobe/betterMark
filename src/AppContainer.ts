@@ -11,11 +11,16 @@ import { CoachAgentHandler } from './application/handlers/CoachAgentHandler.js';
 import { LoggerAgentHandler } from './application/handlers/LoggerAgentHandler.js';
 import { PlannerAgentHandler } from './application/handlers/PlannerAgentHandler.js';
 import { HealthController } from './interface-adapters/controllers/HealthController.js';
+import { AgentGovernanceService } from './application/services/AgentGovernanceService.js';
+import { AgentPolicy } from './domain/value-objects/AgentPolicy.js';
+import { PromptBuilder } from './application/ai/PromptTemplates.js';
 
 export class AppContainer {
     // Services
     public eventDispatcher: InMemoryEventDispatcher;
     public llmService: MockLlmService;
+    public governanceService: AgentGovernanceService;
+    public promptBuilder: PromptBuilder;
 
     // Repositories
     public goalRepository: PrismaGoalRepository;
@@ -35,22 +40,59 @@ export class AppContainer {
         // 1. Infrastructure
         this.eventDispatcher = new InMemoryEventDispatcher();
         this.llmService = new MockLlmService();
+        this.promptBuilder = new PromptBuilder();
         this.goalRepository = new PrismaGoalRepository();
         this.taskRepository = new PrismaTaskRepository();
         this.subGoalRepository = new PrismaSubGoalRepository();
         this.scheduleRepository = new PrismaScheduleRepository();
         this.agentActionLogRepository = new InMemoryAgentActionLogRepository();
 
-        // 2. Agents / Handlers (Dependency Injection)
-        this.eventDispatcher.subscribe('GoalCompleted', new CoachAgentHandler(this.goalRepository, this.llmService, this.agentActionLogRepository));
-        this.eventDispatcher.subscribe('GoalCreated', new LoggerAgentHandler(this.llmService, this.agentActionLogRepository));
-        this.eventDispatcher.subscribe('ScheduleConflictDetected', new PlannerAgentHandler(this.scheduleRepository, this.agentActionLogRepository));
+        // 2. Agent Governance Service (V6)
+        this.governanceService = new AgentGovernanceService(this.llmService, this.promptBuilder);
+        this.registerAgentPolicies();
 
-        // 3. Use Cases
+        // 3. Agents / Handlers (Dependency Injection with Governance)
+        this.eventDispatcher.subscribe('GoalCompleted', new CoachAgentHandler(
+            this.goalRepository,
+            this.governanceService,
+            this.agentActionLogRepository
+        ));
+        this.eventDispatcher.subscribe('GoalCreated', new LoggerAgentHandler(
+            this.llmService,
+            this.agentActionLogRepository
+        ));
+        this.eventDispatcher.subscribe('ScheduleConflictDetected', new PlannerAgentHandler(
+            this.scheduleRepository,
+            this.agentActionLogRepository
+        ));
+
+        // 4. Use Cases
         this.createGoalUseCase = new CreateGoal(this.goalRepository, this.eventDispatcher);
 
-        // 4. Interface Adapters
+        // 5. Interface Adapters
         this.createGoalController = new CreateGoalController(this.createGoalUseCase);
         this.healthController = new HealthController(this.eventDispatcher);
+    }
+
+    /**
+     * Registers agent policies for governance.
+     * Policies define rate limits, confidence thresholds, and fallback behavior.
+     */
+    private registerAgentPolicies(): void {
+        // CoachAgent: Moderate settings with AI enabled
+        this.governanceService.registerPolicy(AgentPolicy.create({
+            agentName: 'CoachAgent',
+            maxSuggestionsPerEvent: 3,
+            confidenceThreshold: 0.7,
+            cooldownMs: 30000, // 30 seconds
+            aiEnabled: true,
+            fallbackToRules: true,
+        }));
+
+        // PlannerAgent: Conservative, rule-based only
+        this.governanceService.registerPolicy(AgentPolicy.conservative('PlannerAgent'));
+
+        // LoggerAgent: Permissive, mostly logging
+        this.governanceService.registerPolicy(AgentPolicy.permissive('LoggerAgent'));
     }
 }
