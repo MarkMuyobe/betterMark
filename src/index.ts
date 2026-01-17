@@ -60,3 +60,32 @@ export * from './shared/utils/IdGenerator.js';
 export * from './domain/value-objects/AgentPolicy.js';
 export * from './application/services/AgentGovernanceService.js';
 export * from './application/ai/PromptTemplates.js';
+
+// V7 AI Integration
+export * from './infrastructure/ai/OpenAILlmService.js';
+export * from './infrastructure/ai/LlmServiceFactory.js';
+export * from './infrastructure/ai/pricing.js';
+
+// V7 Observability
+export * from './application/ports/IObservabilityContext.js';
+export * from './infrastructure/observability/Logger.js';
+export * from './infrastructure/observability/MetricsCollector.js';
+export * from './infrastructure/observability/Tracer.js';
+
+// V7 Cross-Agent Coordination
+export * from './domain/events/AgentActionProposed.js';
+export * from './domain/events/AgentConflictDetected.js';
+export * from './application/services/AgentCoordinationService.js';
+
+// V7 Analytics & Reporting
+export * from './domain/entities/DecisionRecord.js';
+export * from './application/ports/IDecisionRecordRepository.js';
+export * from './application/services/AnalyticsService.js';
+export * from './infrastructure/persistence/in-memory/InMemoryDecisionRecordRepository.js';
+export * from './infrastructure/persistence/repositories/PrismaDecisionRecordRepository.js';
+
+// V8 Preparation (Adaptive Agents)
+export * from './domain/entities/AgentLearningProfile.js';
+export * from './application/ports/IAgentLearningRepository.js';
+export * from './application/services/FeedbackCaptureService.js';
+export * from './infrastructure/persistence/in-memory/InMemoryAgentLearningRepository.js';

@@ -131,3 +131,64 @@ model SuperAgent {
   id   String @id @default(uuid())
   name String
 }
+
+// V7 Analytics Models
+
+model AgentActionLog {
+  id              String   @id @default(uuid())
+  timestamp       DateTime @default(now())
+  agentName       String
+  eventType       String
+  eventId         String
+  actionType      String
+  actionPayload   String   // JSON string
+
+  // V6 Governance fields
+  reasoningSource String   @default("rule")  // rule, llm, heuristic, fallback
+  confidence      Float?
+  model           String?
+  promptTokens    Int?
+  completionTokens Int?
+  latencyMs       Int?
+
+  @@index([agentName])
+  @@index([eventType])
+  @@index([timestamp])
+}
+
+model DecisionRecord {
+  id                    String   @id @default(uuid())
+  timestamp             DateTime @default(now())
+
+  // Source event
+  triggeringEventType   String
+  triggeringEventId     String
+  aggregateType         String
+  aggregateId           String
+
+  // Decision details
+  agentName             String
+  decisionType          String   // suggestion, reschedule, goal_adjustment, notification, task_creation, activity_log
+  reasoningSource       String   // rule, llm, heuristic, fallback
+  decisionContent       String
+
+  // AI metadata (null for rule-based decisions)
+  aiModel               String?
+  aiConfidence          Float?
+  aiPromptTokens        Int?
+  aiCompletionTokens    Int?
+  aiCostUsd             Float?
+  aiLatencyMs           Int?
+
+  // Outcome (populated later via feedback)
+  outcomeUserAccepted   Boolean?
+  outcomeUserFeedback   String?
+  outcomeActualResult   String?
+  outcomeRecordedAt     DateTime?
+
+  @@index([agentName])
+  @@index([decisionType])
+  @@index([reasoningSource])
+  @@index([timestamp])
+  @@index([aggregateType, aggregateId])
+}

@@ -117,3 +117,44 @@ export interface SuperAgent {
     id: string;
     name: string;
 }
+
+// V7 Analytics Models
+
+export interface AgentActionLogDb {
+    id: string;
+    timestamp: Date;
+    agentName: string;
+    eventType: string;
+    eventId: string;
+    actionType: string;
+    actionPayload: string;
+    reasoningSource: string;
+    confidence: number | null;
+    model: string | null;
+    promptTokens: number | null;
+    completionTokens: number | null;
+    latencyMs: number | null;
+}
+
+export interface DecisionRecordDb {
+    id: string;
+    timestamp: Date;
+    triggeringEventType: string;
+    triggeringEventId: string;
+    aggregateType: string;
+    aggregateId: string;
+    agentName: string;
+    decisionType: string;
+    reasoningSource: string;
+    decisionContent: string;
+    aiModel: string | null;
+    aiConfidence: number | null;
+    aiPromptTokens: number | null;
+    aiCompletionTokens: number | null;
+    aiCostUsd: number | null;
+    aiLatencyMs: number | null;
+    outcomeUserAccepted: boolean | null;
+    outcomeUserFeedback: string | null;
+    outcomeActualResult: string | null;
+    outcomeRecordedAt: Date | null;
+}

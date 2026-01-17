@@ -2,6 +2,10 @@ import { AgentPolicy } from '../../domain/value-objects/AgentPolicy.js';
 import { IAgentGovernanceMetadata, ReasoningSource } from '../../domain/entities/AgentActionLog.js';
 import { ILlmService, LlmResponse, LlmOptions } from '../ports/ILlmService.js';
 import { PromptBuilder, PromptContext } from '../ai/PromptTemplates.js';
+import { IObservabilityContext, MetricNames, SpanNames } from '../ports/IObservabilityContext.js';
+import { NullLogger } from '../../infrastructure/observability/Logger.js';
+import { NullMetricsCollector } from '../../infrastructure/observability/MetricsCollector.js';
+import { NullTracer } from '../../infrastructure/observability/Tracer.js';
 
 /**
  * Result of a governed AI generation request
@@ -16,6 +20,17 @@ export interface GovernedResponse {
  * Fallback function type for rule-based responses
  */
 export type FallbackFn = () => string;
+
+/**
+ * Creates a null observability context for backward compatibility.
+ */
+function createNullObservability(): IObservabilityContext {
+    return {
+        logger: new NullLogger(),
+        metrics: new NullMetricsCollector(),
+        tracer: new NullTracer(),
+    };
+}
 
 /**
  * AgentGovernanceService - Central service for agent policy enforcement.
@@ -35,12 +50,15 @@ export class AgentGovernanceService {
     private cooldowns: Map<string, Date> = new Map(); // key: agentName:aggregateId
     private suggestionCounts: Map<string, number> = new Map(); // key: agentName:eventId
     private promptBuilder: PromptBuilder;
+    private observability: IObservabilityContext;
 
     constructor(
         private llmService: ILlmService,
-        promptBuilder?: PromptBuilder
+        promptBuilder?: PromptBuilder,
+        observability?: IObservabilityContext
     ) {
         this.promptBuilder = promptBuilder ?? new PromptBuilder();
+        this.observability = observability ?? createNullObservability();
     }
 
     /**
@@ -116,72 +134,104 @@ export class AgentGovernanceService {
         fallbackFn: FallbackFn,
         options?: LlmOptions
     ): Promise<GovernedResponse> {
+        const { logger, metrics, tracer } = this.observability;
         const policy = this.getPolicy(agentName);
         const startTime = Date.now();
 
-        // If AI is disabled, use fallback immediately
-        if (!policy.canUseAi()) {
-            return this.createFallbackResponse(
-                agentName,
-                policy,
-                fallbackFn(),
-                'AI disabled by policy',
-                startTime
-            );
-        }
+        return tracer.withSpan(SpanNames.AGENT_GENERATE_SUGGESTION, async () => {
+            const span = tracer.getCurrentSpan();
+            span?.setAttributes({ agentName, templateName });
 
-        try {
-            // Build prompt from template
-            const prompt = this.promptBuilder.build(templateName, context);
-
-            // Call LLM service
-            const llmResponse = await this.llmService.generate(prompt, options);
-
-            // Check confidence threshold
-            if (!policy.isConfidenceSufficient(llmResponse.confidence)) {
-                if (policy.shouldFallbackToRules()) {
-                    return this.createFallbackResponse(
-                        agentName,
-                        policy,
-                        fallbackFn(),
-                        `Confidence ${llmResponse.confidence} below threshold ${policy.confidenceThreshold}`,
-                        startTime
-                    );
-                }
-            }
-
-            // Return successful AI response
-            return {
-                content: llmResponse.content,
-                reasoningSource: 'llm',
-                governance: {
-                    policyName: policy.agentName,
-                    aiUsed: true,
-                    confidence: llmResponse.confidence,
-                    latencyMs: llmResponse.latencyMs,
-                    costUsd: llmResponse.costUsd,
-                    model: llmResponse.model,
-                    fallbackTriggered: false,
-                    tokens: llmResponse.tokens,
-                },
-            };
-
-        } catch (error) {
-            // AI call failed - use fallback if allowed
-            if (policy.shouldFallbackToRules()) {
-                const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            // If AI is disabled, use fallback immediately
+            if (!policy.canUseAi()) {
+                logger.info('AI disabled by policy, using fallback', { agentName });
+                metrics.incrementCounter(MetricNames.AGENT_FALLBACKS_TOTAL, 1, { agent: agentName, reason: 'policy_disabled' });
                 return this.createFallbackResponse(
                     agentName,
                     policy,
                     fallbackFn(),
-                    `AI error: ${errorMessage}`,
+                    'AI disabled by policy',
                     startTime
                 );
             }
 
-            // No fallback allowed - rethrow
-            throw error;
-        }
+            try {
+                // Build prompt from template
+                const prompt = this.promptBuilder.build(templateName, context);
+
+                // Call LLM service
+                logger.debug('Calling LLM service', { agentName, templateName });
+                const timer = metrics.startTimer(MetricNames.AI_LATENCY_MS, { agent: agentName });
+                const llmResponse = await this.llmService.generate(prompt, options);
+                timer();
+
+                // Track AI metrics
+                metrics.incrementCounter(MetricNames.AI_CALLS_TOTAL, 1, { agent: agentName, model: llmResponse.model });
+                metrics.incrementCounter(MetricNames.AI_TOKENS_TOTAL, llmResponse.tokens.total, { agent: agentName });
+                if (llmResponse.costUsd > 0) {
+                    metrics.recordHistogram(MetricNames.AI_COST_USD, llmResponse.costUsd, { agent: agentName });
+                }
+
+                // Check confidence threshold
+                if (!policy.isConfidenceSufficient(llmResponse.confidence)) {
+                    if (policy.shouldFallbackToRules()) {
+                        logger.info('Confidence below threshold, using fallback', {
+                            agentName,
+                            confidence: llmResponse.confidence,
+                            threshold: policy.confidenceThreshold,
+                        });
+                        metrics.incrementCounter(MetricNames.AGENT_FALLBACKS_TOTAL, 1, { agent: agentName, reason: 'low_confidence' });
+                        return this.createFallbackResponse(
+                            agentName,
+                            policy,
+                            fallbackFn(),
+                            `Confidence ${llmResponse.confidence} below threshold ${policy.confidenceThreshold}`,
+                            startTime
+                        );
+                    }
+                }
+
+                logger.info('AI generation successful', { agentName, confidence: llmResponse.confidence, latencyMs: llmResponse.latencyMs });
+                span?.setStatus('ok');
+
+                // Return successful AI response
+                return {
+                    content: llmResponse.content,
+                    reasoningSource: 'llm',
+                    governance: {
+                        policyName: policy.agentName,
+                        aiUsed: true,
+                        confidence: llmResponse.confidence,
+                        latencyMs: llmResponse.latencyMs,
+                        costUsd: llmResponse.costUsd,
+                        model: llmResponse.model,
+                        fallbackTriggered: false,
+                        tokens: llmResponse.tokens,
+                    },
+                };
+
+            } catch (error) {
+                const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+                logger.error('AI generation failed', error as Error, { agentName });
+                metrics.incrementCounter(MetricNames.AI_ERRORS_TOTAL, 1, { agent: agentName });
+                span?.setStatus('error');
+
+                // AI call failed - use fallback if allowed
+                if (policy.shouldFallbackToRules()) {
+                    metrics.incrementCounter(MetricNames.AGENT_FALLBACKS_TOTAL, 1, { agent: agentName, reason: 'ai_error' });
+                    return this.createFallbackResponse(
+                        agentName,
+                        policy,
+                        fallbackFn(),
+                        `AI error: ${errorMessage}`,
+                        startTime
+                    );
+                }
+
+                // No fallback allowed - rethrow
+                throw error;
+            }
+        });
     }
 
     /**

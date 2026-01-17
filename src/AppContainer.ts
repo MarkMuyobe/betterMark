@@ -4,7 +4,6 @@ import { PrismaSubGoalRepository } from './infrastructure/persistence/repositori
 import { PrismaScheduleRepository } from './infrastructure/persistence/repositories/PrismaScheduleRepository.js';
 import { InMemoryAgentActionLogRepository } from './infrastructure/persistence/in-memory/InMemoryAgentActionLogRepository.js';
 import { InMemoryEventDispatcher } from './infrastructure/messaging/InMemoryEventDispatcher.js';
-import { MockLlmService } from './infrastructure/ai/MockLlmService.js';
 import { CreateGoal } from './application/use-cases/implementation/CreateGoal.js';
 import { CreateGoalController } from './interface-adapters/controllers/CreateGoalController.js';
 import { CoachAgentHandler } from './application/handlers/CoachAgentHandler.js';
@@ -12,14 +11,28 @@ import { LoggerAgentHandler } from './application/handlers/LoggerAgentHandler.js
 import { PlannerAgentHandler } from './application/handlers/PlannerAgentHandler.js';
 import { HealthController } from './interface-adapters/controllers/HealthController.js';
 import { AgentGovernanceService } from './application/services/AgentGovernanceService.js';
+import { AgentCoordinationService } from './application/services/AgentCoordinationService.js';
 import { AgentPolicy } from './domain/value-objects/AgentPolicy.js';
 import { PromptBuilder } from './application/ai/PromptTemplates.js';
+import { ILlmService } from './application/ports/ILlmService.js';
+import { LlmServiceFactory } from './infrastructure/ai/LlmServiceFactory.js';
+import { IObservabilityContext } from './application/ports/IObservabilityContext.js';
+import { ConsoleLogger, ILogger } from './infrastructure/observability/Logger.js';
+import { InMemoryMetricsCollector, IMetricsCollector } from './infrastructure/observability/MetricsCollector.js';
+import { SimpleTracer, ITracer } from './infrastructure/observability/Tracer.js';
 
 export class AppContainer {
+    // Observability (V7)
+    public logger: ILogger;
+    public metrics: IMetricsCollector;
+    public tracer: ITracer;
+    public observability: IObservabilityContext;
+
     // Services
     public eventDispatcher: InMemoryEventDispatcher;
-    public llmService: MockLlmService;
+    public llmService: ILlmService;
     public governanceService: AgentGovernanceService;
+    public coordinationService: AgentCoordinationService;
     public promptBuilder: PromptBuilder;
 
     // Repositories
@@ -37,9 +50,19 @@ export class AppContainer {
     public healthController: HealthController;
 
     constructor() {
-        // 1. Infrastructure
+        // 1. Observability (V7 - initialized first, used everywhere)
+        this.logger = new ConsoleLogger({ service: 'bettermark' }, 'info');
+        this.metrics = new InMemoryMetricsCollector();
+        this.tracer = new SimpleTracer();
+        this.observability = {
+            logger: this.logger,
+            metrics: this.metrics,
+            tracer: this.tracer,
+        };
+
+        // 2. Infrastructure
         this.eventDispatcher = new InMemoryEventDispatcher();
-        this.llmService = new MockLlmService();
+        this.llmService = LlmServiceFactory.createFromEnv();
         this.promptBuilder = new PromptBuilder();
         this.goalRepository = new PrismaGoalRepository();
         this.taskRepository = new PrismaTaskRepository();
@@ -47,11 +70,18 @@ export class AppContainer {
         this.scheduleRepository = new PrismaScheduleRepository();
         this.agentActionLogRepository = new InMemoryAgentActionLogRepository();
 
-        // 2. Agent Governance Service (V6)
-        this.governanceService = new AgentGovernanceService(this.llmService, this.promptBuilder);
+        // 3. Agent Coordination Service (V7)
+        this.coordinationService = new AgentCoordinationService(100, this.observability);
+
+        // 4. Agent Governance Service (V6 + V7 observability)
+        this.governanceService = new AgentGovernanceService(
+            this.llmService,
+            this.promptBuilder,
+            this.observability
+        );
         this.registerAgentPolicies();
 
-        // 3. Agents / Handlers (Dependency Injection with Governance)
+        // 5. Agents / Handlers (Dependency Injection with Governance)
         this.eventDispatcher.subscribe('GoalCompleted', new CoachAgentHandler(
             this.goalRepository,
             this.governanceService,
