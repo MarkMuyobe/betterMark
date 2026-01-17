@@ -1,11 +1,14 @@
 import { AgentPolicy } from '../../domain/value-objects/AgentPolicy.js';
 import { IAgentGovernanceMetadata, ReasoningSource } from '../../domain/entities/AgentActionLog.js';
+import { IDecisionRecord, DecisionRecordBuilder, DecisionType, IDecisionAIMetadata } from '../../domain/entities/DecisionRecord.js';
 import { ILlmService, LlmResponse, LlmOptions } from '../ports/ILlmService.js';
+import { IDecisionRecordRepository } from '../ports/IDecisionRecordRepository.js';
 import { PromptBuilder, PromptContext } from '../ai/PromptTemplates.js';
 import { IObservabilityContext, MetricNames, SpanNames } from '../ports/IObservabilityContext.js';
 import { NullLogger } from '../../infrastructure/observability/Logger.js';
 import { NullMetricsCollector } from '../../infrastructure/observability/MetricsCollector.js';
 import { NullTracer } from '../../infrastructure/observability/Tracer.js';
+import { IdGenerator } from '../../shared/utils/IdGenerator.js';
 
 /**
  * Result of a governed AI generation request
@@ -14,6 +17,24 @@ export interface GovernedResponse {
     content: string;
     reasoningSource: ReasoningSource;
     governance: IAgentGovernanceMetadata;
+}
+
+/**
+ * Result of a governed AI generation with decision record tracking.
+ */
+export interface GovernedResponseWithDecisionId extends GovernedResponse {
+    decisionRecordId: string;
+}
+
+/**
+ * Event info for creating a decision record.
+ */
+export interface DecisionEventInfo {
+    triggeringEventType: string;
+    triggeringEventId: string;
+    aggregateType: string;
+    aggregateId: string;
+    decisionType: DecisionType;
 }
 
 /**
@@ -51,14 +72,24 @@ export class AgentGovernanceService {
     private suggestionCounts: Map<string, number> = new Map(); // key: agentName:eventId
     private promptBuilder: PromptBuilder;
     private observability: IObservabilityContext;
+    private decisionRecordRepository: IDecisionRecordRepository | null = null;
 
     constructor(
         private llmService: ILlmService,
         promptBuilder?: PromptBuilder,
-        observability?: IObservabilityContext
+        observability?: IObservabilityContext,
+        decisionRecordRepository?: IDecisionRecordRepository
     ) {
         this.promptBuilder = promptBuilder ?? new PromptBuilder();
         this.observability = observability ?? createNullObservability();
+        this.decisionRecordRepository = decisionRecordRepository ?? null;
+    }
+
+    /**
+     * Sets the decision record repository (for late binding).
+     */
+    setDecisionRecordRepository(repository: IDecisionRecordRepository): void {
+        this.decisionRecordRepository = repository;
     }
 
     /**
@@ -296,6 +327,108 @@ export class AgentGovernanceService {
             }
             throw error;
         }
+    }
+
+    /**
+     * Generates a response with governance AND creates a decision record.
+     *
+     * This method wraps generateWithGovernance and also persists a DecisionRecord
+     * for feedback capture and adaptive learning.
+     *
+     * @param agentName - The agent requesting generation
+     * @param templateName - The prompt template to use
+     * @param context - Context values for the template
+     * @param fallbackFn - Rule-based fallback function
+     * @param eventInfo - Event metadata for the decision record
+     * @param options - Optional LLM generation options
+     */
+    async generateWithDecisionRecord(
+        agentName: string,
+        templateName: string,
+        context: PromptContext,
+        fallbackFn: FallbackFn,
+        eventInfo: DecisionEventInfo,
+        options?: LlmOptions
+    ): Promise<GovernedResponseWithDecisionId> {
+        // Generate the response using existing governance
+        const response = await this.generateWithGovernance(
+            agentName,
+            templateName,
+            context,
+            fallbackFn,
+            options
+        );
+
+        // Create the decision record
+        const decisionRecordId = IdGenerator.generate();
+        const builder = DecisionRecordBuilder.create()
+            .withId(decisionRecordId)
+            .withEvent(eventInfo.triggeringEventType, eventInfo.triggeringEventId)
+            .withAggregate(eventInfo.aggregateType, eventInfo.aggregateId)
+            .withDecision(
+                agentName,
+                eventInfo.decisionType,
+                response.reasoningSource,
+                response.content
+            );
+
+        // Add AI metadata if AI was used
+        if (response.governance.aiUsed && response.governance.tokens) {
+            const aiMetadata: IDecisionAIMetadata = {
+                model: response.governance.model ?? 'unknown',
+                confidence: response.governance.confidence ?? 0,
+                promptTokens: response.governance.tokens.prompt,
+                completionTokens: response.governance.tokens.completion,
+                costUsd: response.governance.costUsd ?? 0,
+                latencyMs: response.governance.latencyMs ?? 0,
+            };
+            builder.withAIMetadata(aiMetadata);
+        }
+
+        const decisionRecord = builder.build();
+
+        // Save the decision record if repository is available
+        if (this.decisionRecordRepository) {
+            await this.decisionRecordRepository.save(decisionRecord);
+        }
+
+        return {
+            ...response,
+            decisionRecordId,
+        };
+    }
+
+    /**
+     * Creates a decision record for a heuristic/rule-based decision (no AI).
+     *
+     * Use this for agents that don't use AI but still want decision tracking.
+     */
+    async createDecisionRecord(
+        agentName: string,
+        content: string,
+        reasoningSource: ReasoningSource,
+        eventInfo: DecisionEventInfo
+    ): Promise<string> {
+        const decisionRecordId = IdGenerator.generate();
+
+        const decisionRecord = DecisionRecordBuilder.create()
+            .withId(decisionRecordId)
+            .withEvent(eventInfo.triggeringEventType, eventInfo.triggeringEventId)
+            .withAggregate(eventInfo.aggregateType, eventInfo.aggregateId)
+            .withDecision(
+                agentName,
+                eventInfo.decisionType,
+                reasoningSource,
+                content
+            )
+            .build();
+
+        // Save the decision record if repository is available
+        if (this.decisionRecordRepository) {
+            await this.decisionRecordRepository.save(decisionRecord);
+        }
+
+        return decisionRecordId;
     }
 
     private createFallbackResponse(

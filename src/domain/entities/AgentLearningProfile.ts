@@ -63,6 +63,37 @@ export interface IPerformanceTrend {
 }
 
 /**
+ * V8 Adaptive Agents: A suggested preference change (not auto-applied).
+ */
+export interface ISuggestedPreference {
+    suggestionId: string;
+    category: string;
+    key: string;
+    suggestedValue: unknown;
+    currentValue?: unknown;
+    confidence: number;
+    reason: string;
+    learnedFrom: string[]; // Decision record IDs
+    suggestedAt: Date;
+    status: 'pending' | 'approved' | 'rejected';
+}
+
+/**
+ * V8 Adaptive Agents: Record of a preference change for audit/rollback.
+ */
+export interface IPreferenceChangeRecord {
+    changeId: string;
+    category: string;
+    key: string;
+    previousValue: unknown | null;
+    newValue: unknown;
+    changedAt: Date;
+    changedBy: 'user' | 'system' | 'learning';
+    reason?: string;
+    suggestionId?: string; // If change came from a suggestion
+}
+
+/**
  * Agent learning profile - tracks all learning data for an agent.
  */
 export interface IAgentLearningProfile {
@@ -82,6 +113,12 @@ export interface IAgentLearningProfile {
 
     // Performance trends
     performanceTrends: IPerformanceTrend[];
+
+    // V8: Suggested preference changes (pending user approval)
+    suggestedPreferences: ISuggestedPreference[];
+
+    // V8: Preference change history for audit/rollback
+    preferenceChangeHistory: IPreferenceChangeRecord[];
 
     // Aggregate metrics
     totalFeedbackReceived: number;
@@ -104,6 +141,8 @@ export class AgentLearningProfileBuilder {
         patterns: [],
         preferences: [],
         performanceTrends: [],
+        suggestedPreferences: [], // V8
+        preferenceChangeHistory: [], // V8
         totalFeedbackReceived: 0,
         overallAcceptanceRate: null,
         averageConfidenceWhenAccepted: 0,
@@ -164,6 +203,8 @@ export class AgentLearningProfileBuilder {
             patterns: this.profile.patterns ?? [],
             preferences: this.profile.preferences ?? [],
             performanceTrends: this.profile.performanceTrends ?? [],
+            suggestedPreferences: this.profile.suggestedPreferences ?? [], // V8
+            preferenceChangeHistory: this.profile.preferenceChangeHistory ?? [], // V8
             totalFeedbackReceived: this.profile.totalFeedbackReceived ?? 0,
             overallAcceptanceRate: this.profile.overallAcceptanceRate ?? null,
             averageConfidenceWhenAccepted: this.profile.averageConfidenceWhenAccepted ?? 0,
