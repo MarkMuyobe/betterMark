@@ -9,10 +9,15 @@ import {
     PREFERENCE_ALLOWED_VALUES,
     PREFERENCE_DEFAULTS,
     AGENT_PREFERENCE_CATEGORIES,
+    PREFERENCE_RISK_LEVELS,
+    PREFERENCE_ADAPTIVE_FLAGS,
+    RISK_LEVEL_THRESHOLDS,
+    RiskLevel,
 } from '../value-objects/PreferenceTypes.js';
 
 /**
  * A preference definition.
+ * V10: Extended with adaptive and riskLevel fields.
  */
 export interface IPreferenceDefinition {
     category: string;
@@ -20,6 +25,10 @@ export interface IPreferenceDefinition {
     allowedValues: readonly unknown[];
     defaultValue: unknown;
     agentName: string;
+    /** V10: Whether this preference can be auto-adapted */
+    adaptive: boolean;
+    /** V10: Risk level for auto-adaptation decisions */
+    riskLevel: RiskLevel;
 }
 
 /**
@@ -55,6 +64,7 @@ export class PreferenceRegistry {
 
     /**
      * Registers all standard preference definitions from PreferenceTypes.
+     * V10: Includes adaptive and riskLevel fields.
      */
     registerStandardDefinitions(): void {
         // Register all preferences based on agent mappings
@@ -62,6 +72,8 @@ export class PreferenceRegistry {
             for (const category of categories) {
                 const allowedValuesMap = PREFERENCE_ALLOWED_VALUES[category];
                 const defaultsMap = PREFERENCE_DEFAULTS[category];
+                const riskLevelMap = PREFERENCE_RISK_LEVELS[category];
+                const adaptiveMap = PREFERENCE_ADAPTIVE_FLAGS[category];
 
                 if (allowedValuesMap && defaultsMap) {
                     for (const [key, allowedValues] of Object.entries(allowedValuesMap)) {
@@ -71,6 +83,8 @@ export class PreferenceRegistry {
                             allowedValues,
                             defaultValue: defaultsMap[key],
                             agentName,
+                            adaptive: adaptiveMap?.[key] ?? false,
+                            riskLevel: riskLevelMap?.[key] ?? 'high',
                         });
                     }
                 }
@@ -173,5 +187,56 @@ export class PreferenceRegistry {
      */
     private makeKey(category: string, key: string): string {
         return `${category}:${key}`;
+    }
+
+    // ========== V10: Auto-Adaptation Support ==========
+
+    /**
+     * V10: Checks if a preference supports auto-adaptation.
+     */
+    isAdaptive(category: string, key: string): boolean {
+        const definition = this.getDefinition(category, key);
+        return definition?.adaptive ?? false;
+    }
+
+    /**
+     * V10: Gets the risk level for a preference.
+     */
+    getRiskLevel(category: string, key: string): RiskLevel {
+        const definition = this.getDefinition(category, key);
+        return definition?.riskLevel ?? 'high';
+    }
+
+    /**
+     * V10: Gets the confidence threshold for auto-adaptation based on risk level.
+     */
+    getConfidenceThreshold(category: string, key: string): number {
+        const riskLevel = this.getRiskLevel(category, key);
+        return RISK_LEVEL_THRESHOLDS[riskLevel];
+    }
+
+    /**
+     * V10: Checks if a suggestion meets the confidence threshold for auto-adaptation.
+     */
+    meetsAutoAdaptThreshold(category: string, key: string, confidence: number): boolean {
+        if (!this.isAdaptive(category, key)) {
+            return false;
+        }
+        const threshold = this.getConfidenceThreshold(category, key);
+        return confidence >= threshold;
+    }
+
+    /**
+     * V10: Gets all adaptive preference definitions.
+     */
+    getAdaptiveDefinitions(): IPreferenceDefinition[] {
+        return this.getAllDefinitions().filter(d => d.adaptive);
+    }
+
+    /**
+     * V10: Gets all definitions by risk level.
+     */
+    getDefinitionsByRiskLevel(riskLevel: RiskLevel): IPreferenceDefinition[] {
+        return this.getAllDefinitions().filter(d => d.riskLevel === riskLevel);
     }
 }

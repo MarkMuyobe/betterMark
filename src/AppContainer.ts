@@ -21,6 +21,8 @@ import { PreferenceAuditService } from './application/services/PreferenceAuditSe
 import { FeedbackCaptureService } from './application/services/FeedbackCaptureService.js';
 import { AdaptiveAnalyticsService } from './application/services/AdaptiveAnalyticsService.js';
 import { AnalyticsService } from './application/services/AnalyticsService.js';
+import { AdaptationPolicyService, InMemoryAdaptationPolicyRepository } from './application/services/AdaptationPolicyService.js';
+import { AutoAdaptationService, InMemoryAutoAdaptationAttemptRepository } from './application/services/AutoAdaptationService.js';
 import { AgentPolicy } from './domain/value-objects/AgentPolicy.js';
 import { PreferenceRegistry } from './domain/services/PreferenceRegistry.js';
 import { PromptBuilder } from './application/ai/PromptTemplates.js';
@@ -30,6 +32,8 @@ import { IObservabilityContext } from './application/ports/IObservabilityContext
 import { ConsoleLogger, ILogger } from './infrastructure/observability/Logger.js';
 import { InMemoryMetricsCollector, IMetricsCollector } from './infrastructure/observability/MetricsCollector.js';
 import { SimpleTracer, ITracer } from './infrastructure/observability/Tracer.js';
+import { PreferenceAutoApplied } from './domain/events/PreferenceAutoApplied.js';
+import { PreferenceAutoBlocked } from './domain/events/PreferenceAutoBlocked.js';
 
 export class AppContainer {
     // Observability (V7)
@@ -54,6 +58,12 @@ export class AppContainer {
     public feedbackCaptureService: FeedbackCaptureService;
     public adaptiveAnalyticsService: AdaptiveAnalyticsService;
     public analyticsService: AnalyticsService;
+
+    // V10 Controlled Adaptation Services
+    public adaptationPolicyRepository: InMemoryAdaptationPolicyRepository;
+    public adaptationAttemptRepository: InMemoryAutoAdaptationAttemptRepository;
+    public adaptationPolicyService: AdaptationPolicyService;
+    public autoAdaptationService: AutoAdaptationService;
 
     // Repositories
     public goalRepository: PrismaGoalRepository;
@@ -138,7 +148,45 @@ export class AppContainer {
             this.observability
         );
 
-        // 8. Agents / Handlers (Dependency Injection with Governance + Learning)
+        // 8. V10 Controlled Adaptation Services
+        this.adaptationPolicyRepository = new InMemoryAdaptationPolicyRepository();
+        this.adaptationAttemptRepository = new InMemoryAutoAdaptationAttemptRepository();
+        this.adaptationPolicyService = new AdaptationPolicyService(
+            this.adaptationPolicyRepository,
+            this.preferenceRegistry,
+            this.observability
+        );
+        this.autoAdaptationService = new AutoAdaptationService(
+            this.agentLearningRepository,
+            this.adaptationPolicyService,
+            this.adaptationAttemptRepository,
+            this.preferenceRegistry,
+            this.eventDispatcher,
+            this.observability
+        );
+
+        // 9. Agents / Handlers (Dependency Injection with Governance + Learning)
+        // Subscribe to V10 auto-adaptation events
+        this.eventDispatcher.subscribe('PreferenceAutoApplied', {
+            handle: async (event) => {
+                const e = event as PreferenceAutoApplied;
+                this.logger.info('V10: Preference auto-applied', {
+                    agentName: e.agentName,
+                    preference: `${e.category}.${e.key}`,
+                    newValue: e.newValue,
+                });
+            },
+        });
+        this.eventDispatcher.subscribe('PreferenceAutoBlocked', {
+            handle: async (event) => {
+                const e = event as PreferenceAutoBlocked;
+                this.logger.info('V10: Auto-adaptation blocked', {
+                    agentName: e.agentName,
+                    reason: e.blockReason,
+                });
+            },
+        });
+
         this.eventDispatcher.subscribe('GoalCompleted', new CoachAgentHandler(
             this.goalRepository,
             this.governanceService,

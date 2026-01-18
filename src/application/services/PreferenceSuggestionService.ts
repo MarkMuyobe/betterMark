@@ -197,13 +197,15 @@ export class PreferenceSuggestionService {
 
     /**
      * Manually creates a suggestion for user review.
+     * V10: Added optional confidence parameter for testing auto-adaptation thresholds.
      */
     async createManualSuggestion(
         agentName: string,
         category: string,
         key: string,
         suggestedValue: unknown,
-        reason: string
+        reason: string,
+        confidence: number = 1.0
     ): Promise<string> {
         // Validate the suggested value
         const validation = this.preferenceRegistry.validate(category, key, suggestedValue);
@@ -223,7 +225,7 @@ export class PreferenceSuggestionService {
             key,
             suggestedValue,
             currentValue,
-            confidence: 1.0, // Manual suggestions have full confidence
+            confidence: Math.max(0, Math.min(1, confidence)), // Clamp to 0-1
             reason,
             learnedFrom: [], // No decision records for manual suggestions
             suggestedAt: new Date(),
