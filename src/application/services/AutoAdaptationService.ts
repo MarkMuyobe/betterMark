@@ -1,10 +1,11 @@
 /**
  * AutoAdaptationService - V10 service for automatic preference adaptation.
+ * V11 Update: Integrates with arbitration when ArbitrationOrchestrator is available.
  *
  * Orchestrates the auto-adaptation process:
  * 1. Processes pending suggestions
  * 2. Evaluates against policies
- * 3. Auto-applies if allowed
+ * 3. V11: Submits proposals to arbitration OR V10: Auto-applies if allowed
  * 4. Records full audit trail
  * 5. Emits domain events
  * 6. Supports rollback
@@ -22,6 +23,8 @@ import { PreferenceAutoBlocked } from '../../domain/events/PreferenceAutoBlocked
 import { PreferenceAutoSkipped } from '../../domain/events/PreferenceAutoSkipped.js';
 import { IObservabilityContext } from '../ports/IObservabilityContext.js';
 import { IdGenerator } from '../../shared/utils/IdGenerator.js';
+import { AgentProposalService, CreateProposalInput } from './AgentProposalService.js';
+import { RiskLevel } from '../../domain/value-objects/PreferenceTypes.js';
 
 /**
  * Result of processing a single suggestion.
@@ -142,6 +145,8 @@ export class InMemoryAutoAdaptationAttemptRepository implements IAutoAdaptationA
 }
 
 export class AutoAdaptationService {
+    private proposalService?: AgentProposalService;
+
     constructor(
         private readonly learningRepository: IAgentLearningRepository,
         private readonly policyService: AdaptationPolicyService,
@@ -150,6 +155,169 @@ export class AutoAdaptationService {
         private readonly eventDispatcher?: IEventDispatcher,
         private readonly observability?: IObservabilityContext
     ) {}
+
+    /**
+     * V11: Set the proposal service for arbitration integration.
+     * When set, auto-adaptation goes through arbitration instead of direct application.
+     */
+    setProposalService(proposalService: AgentProposalService): void {
+        this.proposalService = proposalService;
+        this.observability?.logger?.info('V11 arbitration integration enabled for AutoAdaptationService');
+    }
+
+    /**
+     * V11: Create a proposal for a suggestion without applying it.
+     * The proposal will go through arbitration before execution.
+     */
+    async createProposalForSuggestion(
+        agentName: string,
+        suggestion: ISuggestedPreference,
+        originatingEventId: string
+    ): Promise<{ proposalId: string; blocked?: boolean; blockReason?: string }> {
+        if (!this.proposalService) {
+            throw new Error('ProposalService not configured. Call setProposalService() first.');
+        }
+
+        const policy = await this.policyService.getOrCreatePolicy(agentName);
+
+        // Get current preference value
+        const profile = await this.learningRepository.findByAgentName(agentName);
+        const currentPref = profile?.preferences.find(
+            p => p.category === suggestion.category && p.key === suggestion.key
+        );
+        const currentValue = currentPref?.value ?? this.preferenceRegistry.getDefaultValue(
+            suggestion.category,
+            suggestion.key
+        );
+
+        // Check if already at suggested value
+        if (currentValue === suggestion.suggestedValue) {
+            return {
+                proposalId: '',
+                blocked: true,
+                blockReason: 'preference_already_at_suggested_value',
+            };
+        }
+
+        // Get risk level from registry
+        const riskLevel = this.preferenceRegistry.getRiskLevel(
+            suggestion.category,
+            suggestion.key
+        ) as RiskLevel;
+
+        // Evaluate if auto-adaptation is allowed by V10 policy
+        const evaluation = await this.policyService.evaluateAutoAdaptation(
+            agentName,
+            suggestion.category,
+            suggestion.key,
+            suggestion.confidence,
+            riskLevel
+        );
+
+        if (!evaluation.allowed) {
+            return {
+                proposalId: '',
+                blocked: true,
+                blockReason: evaluation.blockReason,
+            };
+        }
+
+        // V11: Create proposal instead of direct application
+        const proposalInput: CreateProposalInput = {
+            agentName,
+            actionType: 'ApplyPreference',
+            targetRef: {
+                type: 'preference',
+                id: `${suggestion.category}.${suggestion.key}`,
+                key: suggestion.key,
+            },
+            proposedValue: {
+                category: suggestion.category,
+                key: suggestion.key,
+                currentValue,
+                newValue: suggestion.suggestedValue,
+                suggestionId: suggestion.suggestionId,
+            },
+            confidenceScore: suggestion.confidence,
+            costEstimate: 0,
+            riskLevel,
+            originatingEventId,
+            suggestionId: suggestion.suggestionId,
+        };
+
+        const result = await this.proposalService.submitProposal(proposalInput);
+
+        this.observability?.logger?.info('V11: Proposal created for suggestion', {
+            proposalId: result.proposalId,
+            agentName,
+            preference: `${suggestion.category}.${suggestion.key}`,
+        });
+
+        return { proposalId: result.proposalId };
+    }
+
+    /**
+     * V11: Apply a preference after arbitration approval.
+     * Called when a proposal wins arbitration.
+     */
+    async executeApprovedProposal(
+        agentName: string,
+        suggestionId: string,
+        category: string,
+        key: string,
+        newValue: unknown,
+        previousValue: unknown
+    ): Promise<IAutoAdaptResult> {
+        const policy = await this.policyService.getOrCreatePolicy(agentName);
+        const policySnapshot = this.createPolicySnapshot(policy);
+        const riskLevel = this.preferenceRegistry.getRiskLevel(category, key) as RiskLevel;
+
+        // Apply the preference
+        await this.learningRepository.approveSuggestion(agentName, suggestionId, 'learning');
+
+        // Record rate limiting
+        await this.policyService.recordAutoAdaptation(agentName);
+
+        // Get confidence from suggestion
+        const profile = await this.learningRepository.findByAgentName(agentName);
+        const suggestion = profile?.suggestedPreferences?.find(s => s.suggestionId === suggestionId);
+        const confidence = suggestion?.confidence ?? 0.8;
+
+        // Create applied attempt
+        const attempt = AutoAdaptationAttemptBuilder.applied(
+            IdGenerator.generate(),
+            agentName,
+            suggestionId,
+            category,
+            key,
+            previousValue,
+            newValue,
+            confidence,
+            riskLevel,
+            policy.id,
+            policySnapshot
+        );
+        await this.attemptRepository.save(attempt);
+
+        // Emit event
+        if (this.eventDispatcher) {
+            await this.eventDispatcher.dispatch(new PreferenceAutoApplied(attempt));
+        }
+
+        this.observability?.logger?.info('V11: Proposal executed after arbitration', {
+            agentName,
+            suggestionId,
+            preference: `${category}.${key}`,
+            previousValue,
+            newValue,
+        });
+
+        return {
+            suggestionId,
+            attemptId: attempt.id,
+            result: 'applied',
+        };
+    }
 
     /**
      * Process all pending suggestions for an agent.

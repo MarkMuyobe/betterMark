@@ -285,7 +285,7 @@ export class InMemoryAgentLearningRepository implements IAgentLearningRepository
         );
     }
 
-    async rejectSuggestion(agentName: string, suggestionId: string): Promise<void> {
+    async rejectSuggestion(agentName: string, suggestionId: string, _reason?: string): Promise<void> {
         const profile = await this.findByAgentName(agentName);
         if (!profile) return;
 

@@ -116,7 +116,7 @@ export interface IAgentLearningRepository {
     /**
      * Reject a suggestion.
      */
-    rejectSuggestion(agentName: string, suggestionId: string): Promise<void>;
+    rejectSuggestion(agentName: string, suggestionId: string, reason?: string): Promise<void>;
 
     // V8 Adaptive Agents: Audit and rollback methods
 

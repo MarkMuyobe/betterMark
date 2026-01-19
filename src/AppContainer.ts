@@ -35,6 +35,26 @@ import { SimpleTracer, ITracer } from './infrastructure/observability/Tracer.js'
 import { PreferenceAutoApplied } from './domain/events/PreferenceAutoApplied.js';
 import { PreferenceAutoBlocked } from './domain/events/PreferenceAutoBlocked.js';
 
+// V11 Arbitration imports
+import { AgentProposalService } from './application/services/AgentProposalService.js';
+import { ConflictDetectionService } from './application/services/ConflictDetectionService.js';
+import { AgentArbitrationService } from './application/services/AgentArbitrationService.js';
+import { InMemoryAgentProposalRepository } from './infrastructure/persistence/in-memory/InMemoryAgentProposalRepository.js';
+import { InMemoryConflictRepository } from './infrastructure/persistence/in-memory/InMemoryConflictRepository.js';
+import { InMemoryArbitrationPolicyRepository } from './infrastructure/persistence/in-memory/InMemoryArbitrationPolicyRepository.js';
+import { InMemoryArbitrationDecisionRepository } from './infrastructure/persistence/in-memory/InMemoryArbitrationDecisionRepository.js';
+import { ArbitrationPolicyBuilder } from './domain/entities/ArbitrationPolicy.js';
+
+// V12 UI/Control Layer imports
+import { PreferenceProjectionService } from './application/projections/PreferenceProjectionService.js';
+import { SuggestionProjectionService } from './application/projections/SuggestionProjectionService.js';
+import { ArbitrationDecisionProjectionService } from './application/projections/ArbitrationDecisionProjectionService.js';
+import { AuditTrailProjectionService } from './application/projections/AuditTrailProjectionService.js';
+import { DecisionExplanationService } from './application/services/DecisionExplanationService.js';
+import { SuggestionApprovalService } from './application/services/SuggestionApprovalService.js';
+import { EscalationApprovalService } from './application/services/EscalationApprovalService.js';
+import { RollbackService } from './application/services/RollbackService.js';
+
 export class AppContainer {
     // Observability (V7)
     public logger: ILogger;
@@ -64,6 +84,25 @@ export class AppContainer {
     public adaptationAttemptRepository: InMemoryAutoAdaptationAttemptRepository;
     public adaptationPolicyService: AdaptationPolicyService;
     public autoAdaptationService: AutoAdaptationService;
+
+    // V11 Arbitration Services
+    public proposalRepository: InMemoryAgentProposalRepository;
+    public conflictRepository: InMemoryConflictRepository;
+    public arbitrationPolicyRepository: InMemoryArbitrationPolicyRepository;
+    public arbitrationDecisionRepository: InMemoryArbitrationDecisionRepository;
+    public proposalService: AgentProposalService;
+    public conflictDetectionService: ConflictDetectionService;
+    public arbitrationService: AgentArbitrationService;
+
+    // V12 UI/Control Layer Services
+    public preferenceProjection: PreferenceProjectionService;
+    public suggestionProjection: SuggestionProjectionService;
+    public arbitrationProjection: ArbitrationDecisionProjectionService;
+    public auditProjection: AuditTrailProjectionService;
+    public explanationService: DecisionExplanationService;
+    public suggestionApproval: SuggestionApprovalService;
+    public escalationApproval: EscalationApprovalService;
+    public rollbackService: RollbackService;
 
     // Repositories
     public goalRepository: PrismaGoalRepository;
@@ -165,7 +204,99 @@ export class AppContainer {
             this.observability
         );
 
-        // 9. Agents / Handlers (Dependency Injection with Governance + Learning)
+        // 9. V11 Arbitration Services
+        this.proposalRepository = new InMemoryAgentProposalRepository();
+        this.conflictRepository = new InMemoryConflictRepository();
+        this.arbitrationPolicyRepository = new InMemoryArbitrationPolicyRepository();
+        this.arbitrationDecisionRepository = new InMemoryArbitrationDecisionRepository();
+
+        this.proposalService = new AgentProposalService(
+            this.proposalRepository,
+            this.eventDispatcher,
+            this.observability
+        );
+
+        this.conflictDetectionService = new ConflictDetectionService(
+            this.proposalRepository,
+            this.conflictRepository,
+            this.eventDispatcher,
+            this.observability
+        );
+
+        this.arbitrationService = new AgentArbitrationService(
+            this.proposalRepository,
+            this.arbitrationPolicyRepository,
+            this.arbitrationDecisionRepository,
+            this.conflictRepository,
+            this.eventDispatcher,
+            this.observability
+        );
+
+        // Register default arbitration policy
+        this.registerDefaultArbitrationPolicy();
+
+        // Connect V10 auto-adaptation to V11 arbitration
+        this.autoAdaptationService.setProposalService(this.proposalService);
+
+        // 10. V12 UI/Control Layer Services
+        this.preferenceProjection = new PreferenceProjectionService(
+            this.agentLearningRepository,
+            this.preferenceRegistry,
+            this.adaptationAttemptRepository
+        );
+
+        this.suggestionProjection = new SuggestionProjectionService(
+            this.agentLearningRepository,
+            this.preferenceRegistry,
+            this.adaptationPolicyService
+        );
+
+        this.arbitrationProjection = new ArbitrationDecisionProjectionService(
+            this.arbitrationDecisionRepository,
+            this.proposalRepository
+        );
+
+        this.auditProjection = new AuditTrailProjectionService(
+            this.arbitrationDecisionRepository,
+            this.proposalRepository,
+            this.adaptationAttemptRepository
+        );
+
+        this.explanationService = new DecisionExplanationService(
+            this.arbitrationDecisionRepository,
+            this.arbitrationPolicyRepository,
+            this.proposalRepository,
+            this.adaptationAttemptRepository,
+            this.adaptationPolicyService
+        );
+
+        this.suggestionApproval = new SuggestionApprovalService(
+            this.agentLearningRepository,
+            this.eventDispatcher,
+            this.proposalService,
+            this.observability
+        );
+
+        this.escalationApproval = new EscalationApprovalService(
+            this.arbitrationDecisionRepository,
+            this.proposalRepository,
+            this.eventDispatcher,
+            this.observability
+        );
+
+        this.rollbackService = new RollbackService(
+            this.agentLearningRepository,
+            this.arbitrationDecisionRepository,
+            this.proposalRepository,
+            this.adaptationAttemptRepository,
+            this.autoAdaptationService,
+            this.eventDispatcher,
+            this.observability
+        );
+
+        this.logger.info('V12: UI/Control Layer services initialized');
+
+        // 11. Agents / Handlers (Dependency Injection with Governance + Learning)
         // Subscribe to V10 auto-adaptation events
         this.eventDispatcher.subscribe('PreferenceAutoApplied', {
             handle: async (event) => {
@@ -234,5 +365,35 @@ export class AppContainer {
 
         // LoggerAgent: Permissive, mostly logging
         this.governanceService.registerPolicy(AgentPolicy.permissive('LoggerAgent'));
+    }
+
+    /**
+     * Registers default arbitration policy for V11.
+     * This policy defines how conflicts between agents are resolved.
+     */
+    private registerDefaultArbitrationPolicy(): void {
+        const defaultPolicy = ArbitrationPolicyBuilder.create()
+            .withId('default-arbitration-policy')
+            .withName('Default Arbitration Policy')
+            .withDescription('Priority-based resolution with escalation for high-risk actions')
+            .withScope('global')
+            .withStrategy('priority')
+            .withPriorityOrder(['CoachAgent', 'PlannerAgent', 'LoggerAgent'])
+            .withWeights({ confidence: 1.0, cost: 0.5, risk: 0.5 })
+            .withEscalationRule({
+                riskThreshold: 'high',
+                confidenceThreshold: 0.3,
+                onMultiAgentConflict: false,
+            })
+            .withDefault(true)
+            .build();
+
+        this.arbitrationPolicyRepository.save(defaultPolicy);
+
+        this.logger.info('V11: Default arbitration policy registered', {
+            policyId: defaultPolicy.id,
+            strategy: defaultPolicy.resolutionStrategy,
+            priorityOrder: defaultPolicy.priorityOrder,
+        });
     }
 }
