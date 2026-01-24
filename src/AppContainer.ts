@@ -55,6 +55,28 @@ import { SuggestionApprovalService } from './application/services/SuggestionAppr
 import { EscalationApprovalService } from './application/services/EscalationApprovalService.js';
 import { RollbackService } from './application/services/RollbackService.js';
 
+// V13 Admin Control Plane imports
+import { AdminPreferencesController } from './interface-adapters/controllers/admin/AdminPreferencesController.js';
+import { AdminSuggestionsController } from './interface-adapters/controllers/admin/AdminSuggestionsController.js';
+import { AdminArbitrationsController } from './interface-adapters/controllers/admin/AdminArbitrationsController.js';
+import { AdminAuditController } from './interface-adapters/controllers/admin/AdminAuditController.js';
+import { AdminExplanationsController } from './interface-adapters/controllers/admin/AdminExplanationsController.js';
+import { AdminAuthController } from './interface-adapters/controllers/admin/AdminAuthController.js';
+import { AdminRouter } from './interface-adapters/routing/AdminRouter.js';
+import { MetricsController } from './interface-adapters/controllers/MetricsController.js';
+
+// V14 Productization imports
+import { JwtService } from './infrastructure/auth/JwtService.js';
+import { InMemoryTokenStore, ITokenStore } from './infrastructure/auth/TokenStore.js';
+import { InMemoryUserStore, IUserStore } from './infrastructure/auth/UserStore.js';
+import { JwtAuth } from './interface-adapters/middleware/JwtAuth.js';
+import { InMemoryIdempotencyStore, IIdempotencyStore } from './infrastructure/persistence/in-memory/InMemoryIdempotencyStore.js';
+import { IdempotencyMiddleware } from './interface-adapters/middleware/IdempotencyMiddleware.js';
+import { TimeoutMiddleware } from './interface-adapters/middleware/TimeoutMiddleware.js';
+import { CircuitBreaker, CircuitBreakerRegistry } from './infrastructure/resilience/CircuitBreaker.js';
+import { LLM_CIRCUIT_BREAKER_CONFIG } from './infrastructure/resilience/CircuitBreakerConfig.js';
+import { AdminMetrics } from './infrastructure/observability/AdminMetrics.js';
+
 export class AppContainer {
     // Observability (V7)
     public logger: ILogger;
@@ -120,6 +142,28 @@ export class AppContainer {
     public createGoalController: CreateGoalController;
     public healthController: HealthController;
 
+    // V13 Admin Control Plane
+    public adminPreferencesController: AdminPreferencesController;
+    public adminSuggestionsController: AdminSuggestionsController;
+    public adminArbitrationsController: AdminArbitrationsController;
+    public adminAuditController: AdminAuditController;
+    public adminExplanationsController: AdminExplanationsController;
+    public adminAuthController: AdminAuthController;
+    public adminRouter: AdminRouter;
+    public metricsController: MetricsController;
+
+    // V14 Productization
+    public jwtService: JwtService;
+    public tokenStore: ITokenStore;
+    public userStore: IUserStore;
+    public jwtAuth: JwtAuth;
+    public idempotencyStore: IIdempotencyStore;
+    public idempotencyMiddleware: IdempotencyMiddleware;
+    public timeoutMiddleware: TimeoutMiddleware;
+    public circuitBreakerRegistry: CircuitBreakerRegistry;
+    public llmCircuitBreaker: CircuitBreaker;
+    public adminMetrics: AdminMetrics;
+
     constructor() {
         // 1. Observability (V7 - initialized first, used everywhere)
         this.logger = new ConsoleLogger({ service: 'bettermark' }, 'info');
@@ -149,7 +193,8 @@ export class AppContainer {
         // 4. Agent Coordination Service (V7)
         this.coordinationService = new AgentCoordinationService(100, this.observability);
 
-        // 5. Agent Governance Service (V6 + V7 observability + V8 decision records)
+        // 5. Agent Governance Service (V6 + V7 observability + V8 decision records + V14 circuit breaker)
+        // Note: Circuit breaker and adminMetrics are set after V14 services are initialized
         this.governanceService = new AgentGovernanceService(
             this.llmService,
             this.promptBuilder,
@@ -296,6 +341,34 @@ export class AppContainer {
 
         this.logger.info('V12: UI/Control Layer services initialized');
 
+        // 10.5 V14 Productization Services
+        this.jwtService = new JwtService();
+        this.tokenStore = new InMemoryTokenStore(60000); // Cleanup every minute
+        this.userStore = new InMemoryUserStore();
+        this.jwtAuth = new JwtAuth(this.jwtService);
+        this.idempotencyStore = new InMemoryIdempotencyStore(60000); // Cleanup every minute
+        this.idempotencyMiddleware = new IdempotencyMiddleware(this.idempotencyStore);
+        this.timeoutMiddleware = new TimeoutMiddleware();
+        this.circuitBreakerRegistry = new CircuitBreakerRegistry();
+        this.llmCircuitBreaker = this.circuitBreakerRegistry.getOrCreate({
+            name: 'llm',
+            ...LLM_CIRCUIT_BREAKER_CONFIG,
+            onStateChange: (from, to) => {
+                this.logger.info('V14: Circuit breaker state change', {
+                    service: 'llm',
+                    from,
+                    to,
+                });
+            },
+        });
+        this.adminMetrics = new AdminMetrics(this.metrics);
+
+        // V14: Wire circuit breaker and metrics to governance service
+        this.governanceService.setCircuitBreaker(this.llmCircuitBreaker);
+        this.governanceService.setAdminMetrics(this.adminMetrics);
+
+        this.logger.info('V14: Productization services initialized');
+
         // 11. Agents / Handlers (Dependency Injection with Governance + Learning)
         // Subscribe to V10 auto-adaptation events
         this.eventDispatcher.subscribe('PreferenceAutoApplied', {
@@ -343,6 +416,52 @@ export class AppContainer {
         // 10. Interface Adapters
         this.createGoalController = new CreateGoalController(this.createGoalUseCase);
         this.healthController = new HealthController(this.eventDispatcher);
+
+        // 11. V13 Admin Control Plane Controllers and Router (V14: with metrics)
+        this.adminPreferencesController = new AdminPreferencesController(
+            this.preferenceProjection,
+            this.rollbackService,
+            this.adminMetrics
+        );
+        this.adminSuggestionsController = new AdminSuggestionsController(
+            this.suggestionProjection,
+            this.suggestionApproval,
+            this.adminMetrics
+        );
+        this.adminArbitrationsController = new AdminArbitrationsController(
+            this.arbitrationProjection,
+            this.escalationApproval,
+            this.rollbackService,
+            this.adminMetrics
+        );
+        this.adminAuditController = new AdminAuditController(
+            this.auditProjection
+        );
+        this.adminExplanationsController = new AdminExplanationsController(
+            this.explanationService
+        );
+        this.adminAuthController = new AdminAuthController(
+            this.jwtService,
+            this.tokenStore,
+            this.userStore
+        );
+        this.metricsController = new MetricsController(this.metrics);
+
+        this.adminRouter = new AdminRouter({
+            preferencesController: this.adminPreferencesController,
+            suggestionsController: this.adminSuggestionsController,
+            arbitrationsController: this.adminArbitrationsController,
+            auditController: this.adminAuditController,
+            explanationsController: this.adminExplanationsController,
+            authController: this.adminAuthController,
+            jwtAuth: this.jwtAuth,
+            idempotencyMiddleware: this.idempotencyMiddleware,
+            timeoutMiddleware: this.timeoutMiddleware,
+            adminMetrics: this.adminMetrics,
+        });
+
+        this.logger.info('V13: Admin Control Plane initialized');
+        this.logger.info('V14: Production hardening complete');
     }
 
     /**

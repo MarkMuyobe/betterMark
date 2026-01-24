@@ -9,6 +9,8 @@ import { NullLogger } from '../../infrastructure/observability/Logger.js';
 import { NullMetricsCollector } from '../../infrastructure/observability/MetricsCollector.js';
 import { NullTracer } from '../../infrastructure/observability/Tracer.js';
 import { IdGenerator } from '../../shared/utils/IdGenerator.js';
+import { CircuitBreaker, CircuitOpenError } from '../../infrastructure/resilience/CircuitBreaker.js';
+import { AdminMetrics } from '../../infrastructure/observability/AdminMetrics.js';
 
 /**
  * Result of a governed AI generation request
@@ -62,6 +64,7 @@ function createNullObservability(): IObservabilityContext {
  * - Track AI usage per agent/aggregate
  * - Handle AI calls with fallback behavior
  * - Provide observability metadata
+ * - V14: Integrate circuit breaker for LLM calls
  *
  * This service sits in the Application layer and is injected into agent handlers.
  * It does NOT mutate domain entities.
@@ -73,16 +76,22 @@ export class AgentGovernanceService {
     private promptBuilder: PromptBuilder;
     private observability: IObservabilityContext;
     private decisionRecordRepository: IDecisionRecordRepository | null = null;
+    private circuitBreaker: CircuitBreaker | null = null;
+    private adminMetrics: AdminMetrics | null = null;
 
     constructor(
         private llmService: ILlmService,
         promptBuilder?: PromptBuilder,
         observability?: IObservabilityContext,
-        decisionRecordRepository?: IDecisionRecordRepository
+        decisionRecordRepository?: IDecisionRecordRepository,
+        circuitBreaker?: CircuitBreaker,
+        adminMetrics?: AdminMetrics
     ) {
         this.promptBuilder = promptBuilder ?? new PromptBuilder();
         this.observability = observability ?? createNullObservability();
         this.decisionRecordRepository = decisionRecordRepository ?? null;
+        this.circuitBreaker = circuitBreaker ?? null;
+        this.adminMetrics = adminMetrics ?? null;
     }
 
     /**
@@ -90,6 +99,20 @@ export class AgentGovernanceService {
      */
     setDecisionRecordRepository(repository: IDecisionRecordRepository): void {
         this.decisionRecordRepository = repository;
+    }
+
+    /**
+     * V14: Sets the circuit breaker (for late binding).
+     */
+    setCircuitBreaker(circuitBreaker: CircuitBreaker): void {
+        this.circuitBreaker = circuitBreaker;
+    }
+
+    /**
+     * V14: Sets the admin metrics (for late binding).
+     */
+    setAdminMetrics(adminMetrics: AdminMetrics): void {
+        this.adminMetrics = adminMetrics;
     }
 
     /**
@@ -190,10 +213,36 @@ export class AgentGovernanceService {
                 // Build prompt from template
                 const prompt = this.promptBuilder.build(templateName, context);
 
-                // Call LLM service
+                // Call LLM service (V14: wrapped with circuit breaker if available)
                 logger.debug('Calling LLM service', { agentName, templateName });
                 const timer = metrics.startTimer(MetricNames.AI_LATENCY_MS, { agent: agentName });
-                const llmResponse = await this.llmService.generate(prompt, options);
+
+                let llmResponse: LlmResponse;
+                if (this.circuitBreaker) {
+                    try {
+                        llmResponse = await this.circuitBreaker.execute(async () => {
+                            return this.llmService.generate(prompt, options);
+                        });
+                    } catch (cbError) {
+                        if (cbError instanceof CircuitOpenError) {
+                            // V14: Record circuit breaker failure
+                            this.adminMetrics?.recordCircuitBreakerFailure('llm');
+                            logger.warn('Circuit breaker open, using fallback', { agentName, service: 'llm' });
+                            metrics.incrementCounter(MetricNames.AGENT_FALLBACKS_TOTAL, 1, { agent: agentName, reason: 'circuit_open' });
+                            timer();
+                            return this.createFallbackResponse(
+                                agentName,
+                                policy,
+                                fallbackFn(),
+                                'Circuit breaker open for LLM service',
+                                startTime
+                            );
+                        }
+                        throw cbError;
+                    }
+                } else {
+                    llmResponse = await this.llmService.generate(prompt, options);
+                }
                 timer();
 
                 // Track AI metrics
@@ -267,6 +316,7 @@ export class AgentGovernanceService {
 
     /**
      * Simple generation without templates (for backward compatibility).
+     * V14: Now uses circuit breaker if available.
      */
     async generateSimple(
         agentName: string,
@@ -288,7 +338,29 @@ export class AgentGovernanceService {
         }
 
         try {
-            const llmResponse = await this.llmService.generate(prompt, options);
+            // V14: Wrap LLM call with circuit breaker if available
+            let llmResponse: LlmResponse;
+            if (this.circuitBreaker) {
+                try {
+                    llmResponse = await this.circuitBreaker.execute(async () => {
+                        return this.llmService.generate(prompt, options);
+                    });
+                } catch (cbError) {
+                    if (cbError instanceof CircuitOpenError) {
+                        this.adminMetrics?.recordCircuitBreakerFailure('llm');
+                        return this.createFallbackResponse(
+                            agentName,
+                            policy,
+                            fallbackFn(),
+                            'Circuit breaker open for LLM service',
+                            startTime
+                        );
+                    }
+                    throw cbError;
+                }
+            } else {
+                llmResponse = await this.llmService.generate(prompt, options);
+            }
 
             if (!policy.isConfidenceSufficient(llmResponse.confidence) && policy.shouldFallbackToRules()) {
                 return this.createFallbackResponse(
