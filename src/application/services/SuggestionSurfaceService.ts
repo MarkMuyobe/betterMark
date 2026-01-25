@@ -5,7 +5,7 @@
  * NO NEW BACKEND LOGIC - purely aggregation and transformation.
  */
 
-import { v4 as uuidv4 } from 'uuid';
+// Note: uuid import removed - using built-in methods instead
 import {
     SuggestionContext,
     SuggestionActionType,
@@ -116,12 +116,12 @@ export class SuggestionSurfaceService {
 
             return {
                 decisionId,
-                title: explanation.summary || 'Decision Explanation',
-                summary: explanation.reasoning || 'No detailed reasoning available.',
-                factors: (explanation.factors || []).map(f => ({
+                title: 'Decision Explanation',
+                summary: explanation.summary || 'No detailed reasoning available.',
+                factors: explanation.contributingFactors.map(f => ({
                     name: f.name,
                     description: f.description,
-                    weight: this.mapConfidence(f.weight),
+                    weight: this.mapConfidence(f.impact === 'positive' ? 0.8 : f.impact === 'negative' ? 0.2 : 0.5),
                 })),
                 auditTrailUrl: `/admin/audit?decisionId=${decisionId}`,
             };
@@ -178,8 +178,8 @@ export class SuggestionSurfaceService {
         }
 
         // Get pending coach suggestions
-        const suggestions = await this.suggestionProjection.getPendingSuggestions();
-        const coachSuggestion = suggestions.find(s => s.agentId === 'CoachAgent');
+        const suggestions = await this.suggestionProjection.buildPendingSuggestionReadModels();
+        const coachSuggestion = suggestions.find(s => s.agentType === 'CoachAgent');
 
         if (!coachSuggestion) {
             // Return a default encouragement without preference suggestion
@@ -193,7 +193,7 @@ export class SuggestionSurfaceService {
             agentType: 'coach',
             title: 'Nice work!',
             message: coachSuggestion.reason || 'You usually stay focused when you plan the next task immediately.',
-            confidence: this.mapConfidence(coachSuggestion.confidence),
+            confidence: this.mapConfidence(coachSuggestion.confidenceScore),
             actions: {
                 applyOnce: {
                     type: SuggestionActionType.ApplyOnce,
@@ -204,14 +204,15 @@ export class SuggestionSurfaceService {
                 alwaysDoThis: {
                     type: SuggestionActionType.AlwaysDoThis,
                     label: 'Always remind me',
-                    suggestionId: coachSuggestion.id,
+                    suggestionId: coachSuggestion.suggestionId,
                 },
                 dismiss: {
                     type: SuggestionActionType.Dismiss,
                     label: 'Dismiss',
                 },
             },
-            decisionId: coachSuggestion.decisionId,
+            // TODO: SuggestionReadModel doesn't have decisionId - will need to track separately if needed
+            decisionId: undefined,
             context: SuggestionContext.TaskCompletion,
             generatedAt: new Date(),
             completedTaskId: contextData.completedTaskId,
@@ -272,8 +273,8 @@ export class SuggestionSurfaceService {
 
         // Find conflicts with requested slot
         const conflicts = schedule.blocks.filter(block => {
-            const blockStart = block.timeRange.start.getTime();
-            const blockEnd = block.timeRange.end.getTime();
+            const blockStart = new Date(block.startTime).getTime();
+            const blockEnd = new Date(block.endTime).getTime();
             const requestStart = contextData.requestedSlot!.start.getTime();
             const requestEnd = contextData.requestedSlot!.end.getTime();
             return blockStart < requestEnd && blockEnd > requestStart;
@@ -284,8 +285,8 @@ export class SuggestionSurfaceService {
         }
 
         // Get pending planner suggestions
-        const suggestions = await this.suggestionProjection.getPendingSuggestions();
-        const plannerSuggestion = suggestions.find(s => s.agentId === 'PlannerAgent');
+        const suggestions = await this.suggestionProjection.buildPendingSuggestionReadModels();
+        const plannerSuggestion = suggestions.find(s => s.agentType === 'PlannerAgent');
 
         // Find alternative slot
         const duration = (contextData.requestedSlot.end.getTime() - contextData.requestedSlot.start.getTime()) / 60000;
@@ -304,36 +305,37 @@ export class SuggestionSurfaceService {
             agentType: 'planner',
             title: 'Scheduling conflict',
             message: `This slot conflicts with: ${conflictReasons}`,
-            confidence: plannerSuggestion ? this.mapConfidence(plannerSuggestion.confidence) : 'medium',
+            confidence: plannerSuggestion ? this.mapConfidence(plannerSuggestion.confidenceScore) : 'medium',
             actions: {
                 applyOnce: {
                     type: SuggestionActionType.ApplyOnce,
                     label: 'Use suggested slot',
                     endpoint: `/app/tasks/${contextData.taskId}/schedule`,
                     payload: {
-                        start: suggestedSlot.start.toISOString(),
-                        end: suggestedSlot.end.toISOString(),
+                        start: suggestedSlot.startTime,
+                        end: suggestedSlot.endTime,
                     },
                 },
                 alwaysDoThis: {
                     type: SuggestionActionType.AlwaysDoThis,
                     label: 'Auto-resolve conflicts',
-                    suggestionId: plannerSuggestion?.id,
+                    suggestionId: plannerSuggestion?.suggestionId,
                 },
                 dismiss: {
                     type: SuggestionActionType.Dismiss,
                     label: 'Keep unassigned',
                 },
             },
-            decisionId: plannerSuggestion?.decisionId,
+            // TODO: SuggestionReadModel doesn't have decisionId - will need to track separately if needed
+            decisionId: undefined,
             context: SuggestionContext.SchedulingConflict,
             generatedAt: new Date(),
             taskId: contextData.taskId,
             taskTitle: contextData.taskTitle || 'Task',
             conflictReason: conflictReasons,
             suggestedSlot: {
-                start: suggestedSlot.start,
-                end: suggestedSlot.end,
+                start: new Date(suggestedSlot.startTime),
+                end: new Date(suggestedSlot.endTime),
             },
         };
     }
@@ -343,7 +345,7 @@ export class SuggestionSurfaceService {
      */
     private async getDashboardSuggestion(): Promise<DashboardSuggestion | null> {
         // Get the most recent pending suggestion from any agent
-        const suggestions = await this.suggestionProjection.getPendingSuggestions();
+        const suggestions = await this.suggestionProjection.buildPendingSuggestionReadModels();
 
         if (suggestions.length === 0) {
             return null;
@@ -351,16 +353,16 @@ export class SuggestionSurfaceService {
 
         // Pick the most recent suggestion
         const suggestion = suggestions[0];
-        const suggestionId = `dashboard-${suggestion.id}`;
+        const suggestionId = `dashboard-${suggestion.suggestionId}`;
 
-        const agentType = this.mapAgentType(suggestion.agentId);
+        const agentType = this.mapAgentType(suggestion.agentType);
 
         return {
             id: suggestionId,
             agentType,
             title: this.getDashboardTitle(agentType),
             message: suggestion.reason || 'Based on your recent activity, here\'s a suggestion.',
-            confidence: this.mapConfidence(suggestion.confidence),
+            confidence: this.mapConfidence(suggestion.confidenceScore),
             actions: {
                 applyOnce: {
                     type: SuggestionActionType.ApplyOnce,
@@ -371,17 +373,18 @@ export class SuggestionSurfaceService {
                 alwaysDoThis: {
                     type: SuggestionActionType.AlwaysDoThis,
                     label: 'Enable this behavior',
-                    suggestionId: suggestion.id,
+                    suggestionId: suggestion.suggestionId,
                 },
                 dismiss: {
                     type: SuggestionActionType.Dismiss,
                     label: 'Dismiss',
                 },
             },
-            decisionId: suggestion.decisionId,
+            // TODO: SuggestionReadModel doesn't have decisionId - will need to track separately if needed
+            decisionId: undefined,
             context: SuggestionContext.Dashboard,
             generatedAt: new Date(),
-            basedOnDecisionId: suggestion.decisionId || '',
+            basedOnDecisionId: '',
         };
     }
 
@@ -395,30 +398,34 @@ export class SuggestionSurfaceService {
         const periodEnd = contextData.periodEnd || new Date();
 
         // Get activity logs for the period
-        const logs = await this.activityProjection.getActivityForPeriod(periodStart, periodEnd);
+        const logs = await this.activityProjection.buildAllActivityLogReadModels({
+            dateFrom: periodStart,
+            dateTo: periodEnd,
+        });
 
         if (logs.length === 0) {
             return null;
         }
 
-        // Analyze logs for insights (simple categorization)
-        const reactiveCount = logs.filter(l => l.type === 'reactive' || l.category === 'reactive').length;
-        const proactiveCount = logs.filter(l => l.type === 'proactive' || l.category === 'proactive').length;
+        // Analyze logs for insights (simple categorization based on type)
+        // ActivityLogReadModel types: task_completed, goal_completed, task_scheduled, manual_log
+        const taskCompletedCount = logs.filter(l => l.type === 'task_completed').length;
+        const scheduledCount = logs.filter(l => l.type === 'task_scheduled').length;
         const totalLogs = logs.length;
 
-        // Generate insight message
+        // Generate insight message based on activity patterns
         let message: string;
-        if (reactiveCount > proactiveCount) {
-            message = 'Most of your logged work this week was reactive. Would you like to plan ahead?';
-        } else if (proactiveCount > reactiveCount) {
-            message = 'Great job staying proactive this week! Keep up the momentum.';
+        if (scheduledCount > taskCompletedCount) {
+            message = 'You scheduled more tasks than you completed this week. Would you like to review your workload?';
+        } else if (taskCompletedCount > scheduledCount && taskCompletedCount > 0) {
+            message = 'Great job completing tasks this week! Keep up the momentum.';
         } else {
             message = `You logged ${totalLogs} activities this period. Review your patterns?`;
         }
 
         // Get pending logger suggestions
-        const suggestions = await this.suggestionProjection.getPendingSuggestions();
-        const loggerSuggestion = suggestions.find(s => s.agentId === 'LoggerAgent');
+        const suggestions = await this.suggestionProjection.buildPendingSuggestionReadModels();
+        const loggerSuggestion = suggestions.find(s => s.agentType === 'LoggerAgent');
 
         const suggestionId = `logs-reflection-${periodStart.toISOString()}`;
 
@@ -438,22 +445,23 @@ export class SuggestionSurfaceService {
                 alwaysDoThis: {
                     type: SuggestionActionType.AlwaysDoThis,
                     label: 'Show weekly insights',
-                    suggestionId: loggerSuggestion?.id,
+                    suggestionId: loggerSuggestion?.suggestionId,
                 },
                 dismiss: {
                     type: SuggestionActionType.Dismiss,
                     label: 'Dismiss',
                 },
             },
-            decisionId: loggerSuggestion?.decisionId,
+            // TODO: SuggestionReadModel doesn't have decisionId - will need to track separately if needed
+            decisionId: undefined,
             context: SuggestionContext.LogsReflection,
             generatedAt: new Date(),
             periodStart,
             periodEnd,
             stats: {
                 totalLogs,
-                reactiveCount,
-                proactiveCount,
+                reactiveCount: taskCompletedCount,  // Using task_completed as a proxy
+                proactiveCount: scheduledCount,      // Using task_scheduled as a proxy
             },
         };
     }

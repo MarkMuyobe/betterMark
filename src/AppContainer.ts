@@ -96,6 +96,9 @@ import { CreateTask } from './application/use-cases/implementation/CreateTask.js
 import { CompleteTask } from './application/use-cases/implementation/CompleteTask.js';
 import { UpdateGoal } from './application/use-cases/implementation/UpdateGoal.js';
 
+// TODO: Remove debug imports before production
+import { DebugController } from './interface-adapters/controllers/DebugController.js';
+
 export class AppContainer {
     // Observability (V7)
     public logger: ILogger;
@@ -202,6 +205,9 @@ export class AppContainer {
     public productScheduleController: ProductScheduleController;
     public productLogsController: ProductLogsController;
     public productRouter: ProductRouter;
+
+    // TODO: Remove debugController before production
+    public debugController: DebugController;
 
     constructor() {
         // 1. Observability (V7 - initialized first, used everywhere)
@@ -591,6 +597,15 @@ export class AppContainer {
         });
 
         this.logger.info('V15: Product UI initialized');
+
+        // TODO: Remove debug controller initialization before production
+        this.debugController = new DebugController(
+            this.eventDispatcher,
+            this.goalRepository,
+            this.taskRepository,
+            this.suggestionProjection
+        );
+        this.logger.warn('DEBUG: Debug endpoints enabled - disable before production');
     }
 
     /**

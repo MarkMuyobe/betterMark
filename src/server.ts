@@ -56,6 +56,30 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
             return;
         }
 
+        // TODO: Remove debug endpoints before production
+        if (url.startsWith('/debug')) {
+            if (url === '/debug/status' && req.method === 'GET') {
+                await container.debugController.getStatus(req, res);
+                return;
+            }
+            if (url === '/debug/suggestions' && req.method === 'GET') {
+                await container.debugController.listSuggestions(req, res);
+                return;
+            }
+            if (url === '/debug/trigger/coach' && req.method === 'POST') {
+                await container.debugController.triggerCoach(req, res);
+                return;
+            }
+            if (url === '/debug/trigger/planner' && req.method === 'POST') {
+                await container.debugController.triggerPlanner(req, res);
+                return;
+            }
+            if (url === '/debug/trigger/logger' && req.method === 'POST') {
+                await container.debugController.triggerLogger(req, res);
+                return;
+            }
+        }
+
         if (url === '/goals' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => body += chunk.toString());

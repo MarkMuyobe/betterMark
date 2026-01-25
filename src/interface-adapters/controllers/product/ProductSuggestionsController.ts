@@ -132,13 +132,25 @@ export class ProductSuggestionsController {
 
                 case SuggestionActionType.AlwaysDoThis:
                     // Always do this: Approve the underlying suggestion
-                    if (body.underlyingSuggestionId) {
-                        await this.approvalService.approve(body.underlyingSuggestionId);
+                    // TODO: Need agentName to properly approve - for now use default
+                    if (body.underlyingSuggestionId && body.agentName) {
+                        await this.approvalService.approveSuggestion(
+                            body.agentName as string,
+                            body.underlyingSuggestionId as string
+                        );
                         this.sendJson(res, 200, {
                             success: true,
                             actionType,
                             message: 'Preference suggestion approved.',
                             approvedSuggestionId: body.underlyingSuggestionId,
+                        });
+                    } else if (body.underlyingSuggestionId) {
+                        // TODO: Fix - need to look up agent name from suggestion ID
+                        this.sendJson(res, 200, {
+                            success: false,
+                            actionType,
+                            requiresConfirmation: true,
+                            message: 'Agent name required to approve suggestion.',
                         });
                     } else {
                         // No underlying suggestion - return confirmation prompt
@@ -181,12 +193,12 @@ export class ProductSuggestionsController {
             const body = await this.parseBody(req);
             const { suggestionId } = body;
 
-            if (!suggestionId) {
+            if (!suggestionId || typeof suggestionId !== 'string') {
                 this.sendError(res, 400, 'Suggestion ID required');
                 return;
             }
 
-            this.surfaceService.dismissSuggestion(suggestionId);
+            this.surfaceService.dismissSuggestion(suggestionId as string);
 
             this.sendJson(res, 200, {
                 success: true,
