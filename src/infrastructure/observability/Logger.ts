@@ -5,7 +5,11 @@
  * - Log levels (debug, info, warn, error)
  * - Structured context (correlationId, agentName, etc.)
  * - Child loggers for scoped contexts
+ *
+ * V14: Auto-injects correlationId from RequestContext.
  */
+
+import { RequestContext } from './RequestContext.js';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
@@ -14,6 +18,16 @@ export interface LogContext {
     agentName?: string;
     eventType?: string;
     aggregateId?: string;
+    service?: string;
+    component?: string;
+    route?: string;
+    statusCode?: number;
+    latencyMs?: number;
+    actor?: {
+        userId?: string;
+        role?: string;
+    };
+    action?: string;
     [key: string]: unknown;
 }
 
@@ -85,11 +99,31 @@ export class ConsoleLogger implements ILogger {
             return;
         }
 
+        // V14: Auto-inject correlationId and route from RequestContext
+        const requestContext = RequestContext.get();
+        const autoContext: Partial<LogContext> = {};
+
+        if (requestContext) {
+            if (!context?.correlationId && !this.baseContext.correlationId) {
+                autoContext.correlationId = requestContext.correlationId;
+            }
+            if (!context?.route && !this.baseContext.route && requestContext.route) {
+                autoContext.route = requestContext.route;
+            }
+            if (requestContext.user && !context?.actor) {
+                autoContext.actor = {
+                    userId: requestContext.user.userId,
+                    role: requestContext.user.role,
+                };
+            }
+        }
+
         const logEntry = {
             timestamp: new Date().toISOString(),
             level,
             message,
             ...this.baseContext,
+            ...autoContext,
             ...context,
         };
 

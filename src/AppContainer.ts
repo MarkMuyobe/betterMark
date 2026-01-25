@@ -77,6 +77,25 @@ import { CircuitBreaker, CircuitBreakerRegistry } from './infrastructure/resilie
 import { LLM_CIRCUIT_BREAKER_CONFIG } from './infrastructure/resilience/CircuitBreakerConfig.js';
 import { AdminMetrics } from './infrastructure/observability/AdminMetrics.js';
 
+// V15 Product UI imports
+import { SessionAuth, InMemorySessionStore } from './infrastructure/auth/SessionAuth.js';
+import { GoalProjectionService } from './application/projections/GoalProjectionService.js';
+import { TaskProjectionService } from './application/projections/TaskProjectionService.js';
+import { ScheduleProjectionService } from './application/projections/ScheduleProjectionService.js';
+import { ActivityProjectionService, IActivityLogRepository, IJournalEntryRepository } from './application/projections/ActivityProjectionService.js';
+import { InMemoryActivityLogRepository } from './infrastructure/persistence/in-memory/InMemoryActivityLogRepository.js';
+import { InMemoryJournalEntryRepository } from './infrastructure/persistence/in-memory/InMemoryJournalEntryRepository.js';
+import { ProductGoalsController } from './interface-adapters/controllers/product/ProductGoalsController.js';
+import { ProductSubGoalsController } from './interface-adapters/controllers/product/ProductSubGoalsController.js';
+import { ProductTasksController } from './interface-adapters/controllers/product/ProductTasksController.js';
+import { ProductScheduleController } from './interface-adapters/controllers/product/ProductScheduleController.js';
+import { ProductLogsController } from './interface-adapters/controllers/product/ProductLogsController.js';
+import { ProductRouter } from './interface-adapters/routing/ProductRouter.js';
+import { CreateSubGoal } from './application/use-cases/implementation/CreateSubGoal.js';
+import { CreateTask } from './application/use-cases/implementation/CreateTask.js';
+import { CompleteTask } from './application/use-cases/implementation/CompleteTask.js';
+import { UpdateGoal } from './application/use-cases/implementation/UpdateGoal.js';
+
 export class AppContainer {
     // Observability (V7)
     public logger: ILogger;
@@ -163,6 +182,26 @@ export class AppContainer {
     public circuitBreakerRegistry: CircuitBreakerRegistry;
     public llmCircuitBreaker: CircuitBreaker;
     public adminMetrics: AdminMetrics;
+
+    // V15 Product UI
+    public sessionStore: InMemorySessionStore;
+    public sessionAuth: SessionAuth;
+    public activityLogRepository: IActivityLogRepository;
+    public journalEntryRepository: IJournalEntryRepository;
+    public goalProjection: GoalProjectionService;
+    public taskProjection: TaskProjectionService;
+    public scheduleProjection: ScheduleProjectionService;
+    public activityProjection: ActivityProjectionService;
+    public createSubGoalUseCase: CreateSubGoal;
+    public createTaskUseCase: CreateTask;
+    public completeTaskUseCase: CompleteTask;
+    public updateGoalUseCase: UpdateGoal;
+    public productGoalsController: ProductGoalsController;
+    public productSubGoalsController: ProductSubGoalsController;
+    public productTasksController: ProductTasksController;
+    public productScheduleController: ProductScheduleController;
+    public productLogsController: ProductLogsController;
+    public productRouter: ProductRouter;
 
     constructor() {
         // 1. Observability (V7 - initialized first, used everywhere)
@@ -462,6 +501,96 @@ export class AppContainer {
 
         this.logger.info('V13: Admin Control Plane initialized');
         this.logger.info('V14: Production hardening complete');
+
+        // 12. V15 Product UI Services
+        this.sessionStore = new InMemorySessionStore(60000); // Cleanup every minute
+        this.sessionAuth = new SessionAuth(this.sessionStore);
+        this.activityLogRepository = new InMemoryActivityLogRepository();
+        this.journalEntryRepository = new InMemoryJournalEntryRepository();
+
+        // V15 Projection Services
+        this.goalProjection = new GoalProjectionService(
+            this.goalRepository,
+            this.subGoalRepository,
+            this.taskRepository
+        );
+        this.taskProjection = new TaskProjectionService(
+            this.goalRepository,
+            this.subGoalRepository,
+            this.taskRepository,
+            this.scheduleRepository
+        );
+        this.scheduleProjection = new ScheduleProjectionService(
+            this.goalRepository,
+            this.subGoalRepository,
+            this.taskRepository,
+            this.scheduleRepository
+        );
+        this.activityProjection = new ActivityProjectionService(
+            this.goalRepository,
+            this.taskRepository,
+            this.activityLogRepository,
+            this.journalEntryRepository
+        );
+
+        // V15 Use Cases
+        this.createSubGoalUseCase = new CreateSubGoal(
+            this.goalRepository,
+            this.subGoalRepository,
+            this.eventDispatcher
+        );
+        this.createTaskUseCase = new CreateTask(
+            this.subGoalRepository,
+            this.taskRepository,
+            this.eventDispatcher
+        );
+        this.completeTaskUseCase = new CompleteTask(
+            this.taskRepository,
+            this.subGoalRepository,
+            this.goalRepository,
+            this.eventDispatcher
+        );
+        this.updateGoalUseCase = new UpdateGoal(this.goalRepository);
+
+        // V15 Controllers
+        this.productGoalsController = new ProductGoalsController(
+            this.goalProjection,
+            this.createGoalUseCase,
+            this.updateGoalUseCase
+        );
+        this.productSubGoalsController = new ProductSubGoalsController(
+            this.createSubGoalUseCase
+        );
+        this.productTasksController = new ProductTasksController(
+            this.taskProjection,
+            this.createTaskUseCase,
+            this.completeTaskUseCase
+        );
+        this.productScheduleController = new ProductScheduleController(
+            this.scheduleProjection,
+            this.scheduleRepository,
+            this.taskRepository
+        );
+        this.productLogsController = new ProductLogsController(
+            this.activityProjection,
+            this.activityLogRepository,
+            this.journalEntryRepository
+        );
+
+        // V15 Product Router
+        this.productRouter = new ProductRouter({
+            goalsController: this.productGoalsController,
+            subGoalsController: this.productSubGoalsController,
+            tasksController: this.productTasksController,
+            scheduleController: this.productScheduleController,
+            logsController: this.productLogsController,
+            sessionAuth: this.sessionAuth,
+            idempotencyMiddleware: this.idempotencyMiddleware,
+            timeoutMiddleware: this.timeoutMiddleware,
+            adminMetrics: this.adminMetrics,
+        });
+
+        this.logger.info('V15: Product UI initialized');
     }
 
     /**

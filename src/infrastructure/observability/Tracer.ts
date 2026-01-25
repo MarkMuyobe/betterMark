@@ -5,8 +5,11 @@
  * - Request tracing across services
  * - Agent action tracking
  * - Performance analysis
+ *
+ * V14: Updated to use AsyncLocalStorage for thread-safe span tracking.
  */
 
+import { AsyncLocalStorage } from 'async_hooks';
 import { IdGenerator } from '../../shared/utils/IdGenerator.js';
 
 export interface SpanContext {
@@ -157,11 +160,19 @@ class SimpleSpan implements ISpan {
 }
 
 /**
+ * Span stack entry for AsyncLocalStorage.
+ */
+interface SpanStackEntry {
+    span: SimpleSpan;
+}
+
+/**
  * Simple in-memory tracer for development and testing.
+ * V14: Uses AsyncLocalStorage for thread-safe span tracking.
  */
 export class SimpleTracer implements ITracer {
     private traces: Map<string, SimpleSpan[]> = new Map();
-    private currentSpan: SimpleSpan | null = null;
+    private spanStorage: AsyncLocalStorage<SpanStackEntry> = new AsyncLocalStorage();
     private maxTraces: number;
 
     constructor(maxTraces: number = 100) {
@@ -169,13 +180,15 @@ export class SimpleTracer implements ITracer {
     }
 
     startSpan(name: string, parentContext?: SpanContext): ISpan {
-        const traceId = parentContext?.traceId ?? IdGenerator.generate();
+        // Use parent context if provided, otherwise try to get from current context
+        const effectiveParentContext = parentContext ?? this.getCurrentSpan()?.context;
+        const traceId = effectiveParentContext?.traceId ?? IdGenerator.generate();
         const spanId = IdGenerator.generate();
 
         const context: SpanContext = {
             traceId,
             spanId,
-            parentSpanId: parentContext?.spanId,
+            parentSpanId: effectiveParentContext?.spanId,
         };
 
         const span = new SimpleSpan(name, context);
@@ -193,39 +206,35 @@ export class SimpleTracer implements ITracer {
             }
         }
 
-        this.currentSpan = span;
         return span;
     }
 
     getCurrentSpan(): ISpan | null {
-        return this.currentSpan;
+        const entry = this.spanStorage.getStore();
+        return entry?.span ?? null;
     }
 
     async withSpan<T>(name: string, fn: () => Promise<T>): Promise<T> {
-        const parentContext = this.currentSpan?.context;
-        const span = this.startSpan(name, parentContext);
+        const parentContext = this.getCurrentSpan()?.context;
+        const span = this.startSpan(name, parentContext) as SimpleSpan;
 
-        try {
-            const result = await fn();
-            span.setStatus('ok');
-            return result;
-        } catch (error) {
-            span.setStatus('error');
-            if (error instanceof Error) {
-                span.setAttribute('error.message', error.message);
-                span.setAttribute('error.name', error.name);
+        // Run the function with the new span as the current span
+        return this.spanStorage.run({ span }, async () => {
+            try {
+                const result = await fn();
+                span.setStatus('ok');
+                return result;
+            } catch (error) {
+                span.setStatus('error');
+                if (error instanceof Error) {
+                    span.setAttribute('error.message', error.message);
+                    span.setAttribute('error.name', error.name);
+                }
+                throw error;
+            } finally {
+                span.end();
             }
-            throw error;
-        } finally {
-            span.end();
-            // Restore parent span as current
-            if (parentContext) {
-                const parentSpans = this.traces.get(parentContext.traceId);
-                this.currentSpan = parentSpans?.find(s => s.context.spanId === parentContext.spanId) ?? null;
-            } else {
-                this.currentSpan = null;
-            }
-        }
+        });
     }
 
     getTraces(): TraceData[] {
@@ -259,7 +268,6 @@ export class SimpleTracer implements ITracer {
      */
     clear(): void {
         this.traces.clear();
-        this.currentSpan = null;
     }
 }
 

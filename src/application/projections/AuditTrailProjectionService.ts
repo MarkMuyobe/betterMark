@@ -16,11 +16,13 @@ import { IdGenerator } from '../../shared/utils/IdGenerator.js';
 
 /**
  * Query parameters for audit trail.
+ * V14: Added until for time-bound queries.
  */
 export interface AuditTrailQuery {
     agentType?: string;
     type?: AuditRecordType;
     since?: Date;
+    until?: Date;  // V14: End of time window
     limit?: number;
 }
 
@@ -137,8 +139,11 @@ export class AuditTrailProjectionService {
         const readModels: AuditTrailReadModel[] = [];
 
         for (const decision of decisions) {
-            // Filter by date if specified
+            // Filter by date range if specified
             if (query?.since && decision.createdAt < query.since) {
+                continue;
+            }
+            if (query?.until && decision.createdAt > query.until) {
                 continue;
             }
 
