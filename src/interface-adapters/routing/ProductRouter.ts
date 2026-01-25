@@ -14,6 +14,7 @@ import { ProductSubGoalsController } from '../controllers/product/ProductSubGoal
 import { ProductTasksController } from '../controllers/product/ProductTasksController.js';
 import { ProductScheduleController } from '../controllers/product/ProductScheduleController.js';
 import { ProductLogsController } from '../controllers/product/ProductLogsController.js';
+import { ProductSuggestionsController } from '../controllers/product/ProductSuggestionsController.js';
 import { RequestContext } from '../../infrastructure/observability/RequestContext.js';
 import { withCorrelation } from '../../infrastructure/observability/CorrelationMiddleware.js';
 import { ApiError } from '../../shared/errors/ApiError.js';
@@ -29,6 +30,7 @@ export interface ProductRouterDependencies {
     tasksController: ProductTasksController;
     scheduleController: ProductScheduleController;
     logsController: ProductLogsController;
+    suggestionsController?: ProductSuggestionsController; // V16
     sessionAuth: SessionAuth;
     idempotencyMiddleware: IdempotencyMiddleware;
     timeoutMiddleware: TimeoutMiddleware;
@@ -132,6 +134,23 @@ export class ProductRouter {
         this.router.post('/logs/journal', (req, res) =>
             logsController.writeJournal(req, res)
         );
+
+        // V16 Suggestion surface routes
+        const suggestionsController = this.dependencies.suggestionsController;
+        if (suggestionsController) {
+            this.router.get('/suggestions/surface/:context', (req, res, params) =>
+                suggestionsController.getSuggestionForContext(req, res, params)
+            );
+            this.router.get('/suggestions/explanation/:decisionId', (req, res, params) =>
+                suggestionsController.getExplanation(req, res, params)
+            );
+            this.router.post('/suggestions/:suggestionId/action', (req, res, params) =>
+                suggestionsController.executeAction(req, res, params)
+            );
+            this.router.post('/suggestions/dismiss', (req, res) =>
+                suggestionsController.dismiss(req, res)
+            );
+        }
     }
 
     /**
